@@ -307,7 +307,6 @@ You've built a spec-driven API from scratch:
 
 The mental model: **spec is the decision, code is the consequence, guards enforce the contract**. This applies to every product you'll work on — not just APIs.
 
-For deeper reading on the framework, see `docs/background/2026-05-29-spec-driven-development.md` (the conceptual foundation) and `docs/background/2026-07-04-spec-driven-development-learnings.md` (the lessons from building this exact project).
 
 ## What could come next
 

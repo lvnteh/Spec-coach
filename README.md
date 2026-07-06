@@ -43,6 +43,3 @@ claude --agent spec-coach-m1 "start"
 
 [specdrivengreeting](https://github.com/lvnteh/specdrivengreeting) is the answer key. Each milestone is tagged (`m1-hello-world` through `m6-contract`) so you can see what the project looks like at any stage. Look at it after you've written your own version — not before.
 
-## Background reading
-
-The `docs/background/` folder contains the AIX Workflow articles that inspired this experience. Start with `2026-05-29-spec-driven-development.md` for the conceptual foundation, or `2026-07-04-spec-driven-development-learnings.md` for the practical lessons from building the reference project.
