@@ -1,0 +1,262 @@
+- what loop engineering means
+	- term is overloaded — three things people mix up
+		- the Ralph loop
+		- the `/loop` cron command
+		- the broader idea of self-improving AI systems
+	- the interesting one is the last, but talked about least
+	- higher-level shift: not building features inside the IDE — building the systems that build the features
+- the Ralph loop, where it started
+	- ~1.5 years ago, got attention for being almost embarrassingly simple
+		- ```bash
+			while true; do
+			  cat PROMPT.md | agent
+			done
+			```
+		- `PROMPT.md` = "get the highest priority ticket and resolve it"
+	- original motivation: keep your single agent subscription saturated even while you sleep
+		- infinite queue (Jira, GitHub issues, backlog)
+		- empty queue → sleep a few minutes → try again
+	- not how you would design it from first principles
+		- ticket arrives → dispatch agent immediately
+		- agents parallelise in a way humans cannot — 100 tickets → 100 parallel runs
+		- sequential while-loop only made sense around limits of a single subscription
+	- evolution: condition replaces `true`
+		- ```bash
+			while ! npx eslint .; do
+			  agent "Run `npx eslint .` and fix the errors."
+			done
+			```
+		- shape becomes: define "done", loop until done
+		- fix exactly one rule per iteration, loop handles the rest
+	- generalised to feature development
+		- markdown task list with checkboxes
+		- agent takes one item, marks done, commits
+		- outer loop spins until list empty
+- outer loop vs inner loop — why it matters
+	- the loop logic lives outside the agent
+	- you loop the agent; the agent does not loop itself
+	- context management almost for free
+		- each iteration spawns a brand new agent
+		- new agent does not inherit prior tool calls, state, scratch
+		- gets a clean prompt: "here is the work, do it"
+		- context passes between iterations through files (task list, journal markdown)
+	- traceability
+		- each step gets its own commit
+		- runs in a sandbox
+		- you can walk history backwards
+	- danger: a loop you control can also run forever
+		- agent says "I cannot, no Docker access" → loop throws it back → agent says no again → burn money in a circle
+		- needs emergency-exit
+			- agent must be able to say "environment did not change between my last two attempts" and have the loop honour that
+		- needs a budget cap (tokens / iterations / dollars) baked into the same exit logic
+		- on hit: loop quits and pings someone
+	- mostly not interactive
+		- built to be told a goal and grind
+		- human-in-the-loop counterpart exists — Slack ping with link and specific question
+		- ping is last resort, not first move
+		- whole point is minimising how often you step in
+- `/goal` — the poor man's Ralph loop
+	- someone simplified Ralph for vibe-coders → shipped in Claude Code etc.
+	- shape: "goal is X, iterate until X is achieved"
+	- iteration happens inside the agent now, not outside
+	- Claude Code implementation
+		- smaller cheaper model (Haiku) hooked to end-of-turn
+		- grader reads what happened, compares to stated goal, decides if satisfied
+		- if not → bounces work back for another round
+	- meaningful differences from outer loop
+		- verification is weaker
+			- outer loop literally ran ESLint, literally checked the list was empty
+			- `/goal` verifier reads the session transcript — does not re-run ESLint
+			- if agent disables the offending rule, verifier might catch it, might not
+			- fidelity of the check is much lower
+		- context management back inside the agent
+			- loop is internal → agent owns its own context for the whole run
+			- works if agent has sub-agent dispatch, good context hygiene, summarisation
+			- otherwise agent chokes on its own history, work quality collapses
+	- when to use which
+		- simple things → `/goal` is fine
+		- production / long / hard / expensive to verify → want the outer loop for control
+		- they compose: outer loop dispatching tasks to an agent that uses `/goal` per task
+	- `/goal` has been absorbed into model training
+		- recent thinking traces show "what did the user want, am I there yet?" even without invoking `/goal`
+		- pattern internalised — you do not need the command for most of the benefit
+- `/loop` ≠ loop engineering
+	- `/loop` = cron
+	- give it a schedule and a prompt, it fires the prompt on that schedule, that is it
+	- this is not what loop engineering means
+	- if you need a cron, write a cron
+	- naming is unfortunate — sits next to a more interesting concept and steals attention
+	- should have been called `/schedule`
+- what loop engineering actually became
+	- broader than any single loop
+	- harness engineering (the topic 6 months ago — scaffolding around the agent: planning, tool definitions, sub-agent profiles, context windows) has been absorbed into it
+	- if goal is the agent works alone with minimal of your time → loop is the outer shape, harness is everything inside it
+	- you cannot have one without the other
+	- once harness and loop are in the same conversation, self-improvement joins too
+- self-improvement — the part nobody talks about yet
+	- two flavours, both running
+	- scheduled improvement
+		- literally a daily cron
+			- ```text
+				/loop every day at 09:00
+				Digest yesterday's usage of the {XYZ} skill, identify recurring failures,
+				and propose and implement one concrete improvement.
+				```
+		- workflow runs over previous day's traces
+		- looks for patterns
+			- tool call sequences that should have been one call
+			- repetitive failing patterns
+			- 10-step habits that should be a skill
+		- start: proposes the change
+		- once trusted on a finding type → applies automatically
+		- next morning: runs again, looks at how the change performed, tweaks
+		- genuine loop: act → check → act → check
+	- per-session improvement
+		- after a specific run (e.g. 6 tries to get Docker right) → routine analyses that exact session
+		- not "yesterday in general" but "in this concrete work, where did the agent stumble, what would have helped"
+		- action side not yet automated
+		- analysis gives findings → human decides
+		- failure mode of auto-applying from a single session feels catastrophic
+		- probably automated in a quarter or so
+	- the moment you let changes apply autonomously, the system modifies itself
+	- overgrowth — the failure mode
+		- you set up one self-improvement → works → set up another → set up twenty
+		- every morning 30 new skills get generated
+			- most mediocre
+			- half never used
+			- a month later the underlying library has had 2 breaking versions → your skill is worse than nothing
+		- you spent money to generate noise
+	- counter-force needed
+		- pruner / deprecator: kills skills that have not earned their keep, merges duplicates, notices 3 things doing roughly the same thing badly
+		- pulsing system: overgrows → gets cut back → overgrows → gets cut back
+		- always rebalancing against what you are optimising for (cost, speed, quality)
+		- equilibrium is dynamic, never static — rebalancing has to be part of the engineering
+	- practical advice
+		- do not let the agent build a self-improvement system you have not done by hand a couple of times
+		- review traces for a week
+		- identify one pattern
+		- build the skill manually
+		- use it, notice what is wrong, iterate manually
+		- only then do you understand the shape well enough to delegate
+		- people who skip this end up with 100 bad skills and no idea why anything is happening
+- why this converges on cost
+	- a few years ago: tokens cheap, subscriptions cheap, models were giveaway-priced because providers needed training data
+	- window closing — models capable enough, providers will charge real money
+	- self-improvement loops + eval runs + multi-modal pipelines (same task 5x through 5 models, pick best) stack up
+	- easy to burn a 4-figure number in an evening with no spending guardrails
+	- real loop-engineering setup now includes
+		- budget enforcement at the loop level
+		- model selection per step (do not run Opus when Haiku is enough)
+		- a meta-loop monitoring spend per unit of value produced
+	- measurement problem on top of an optimisation problem
+		- what do you measure? cost per fix? time per feature? weighted combination that changes when priority changes?
+		- whole class of work that did not exist before
+	- ensemble vs single big model
+		- classical ML papers proved: ensemble of 10 cheap models > 1 expensive one
+		- 5 Sonnet runs combined intelligently can beat 1 Opus run
+		- you have to do the engineering: merging, voting, deduplication, per-step routing
+		- trade-off is wall-clock time
+		- cost difference often dramatic enough that it pays for itself
+- the road to AGI
+	- recurring pattern in how capabilities land
+		- someone notices a capability current models lack
+		- invents a prompting technique to fake it
+		- technique works → papers and blog posts appear
+		- frameworks bake it in → providers can measure usage (they have the labels)
+		- providers benchmark it → next model is good at it → train next model harder on that shape of data
+		- model just does it natively without being asked
+		- technique disappears from user prompt, reappears as native capability
+	- happened in order with
+		- few-shot examples
+		- chain of thought
+		- tool use
+			- used to require specifying JSON schema by hand
+			- debate over TypeScript vs JSON Schema vs XML for tool specs
+		- todo lists and planning
+		- goal pursuit
+			- most recent — landed around 4.6 / 4.8 Opus generation
+			- model just does it now
+		- self-improvement
+			- asterisk on the list — has not landed natively yet but same arc is visible
+	- each layer stacks on previous ones
+		- chain of thought had to work before goal pursuit could
+		- goal pursuit before serious agents
+		- serious agents before self-improvement lands natively
+		- whole thing is a tower — each new layer multiplies surface area superlinearly
+	- implication for careers
+		- the skill that is hot right now is the one that will be absorbed next
+		- a model demonstrated at the Anthropic conference was trained on free-text input → well-defined goals with verifiable success criteria
+		- already defines better goals than most people
+		- by the time you finish learning evaluation expertise, the model is probably a better evaluator
+		- still worth learning — pays off in the meantime
+		- but do not bet a 10-year career on any single layer of the tower
+	- what is worth betting on: understanding the whole tower
+		- the people doing best are not the ones who memorised the latest trick
+		- they were here for the last 5 tricks, saw each get absorbed
+		- intuition for what is fragile, what will land natively, where rough edges are this month
+		- that intuition does not become obsolete the way a specific technique does
+- where this lands — perception arc
+	- ChatGPT appeared → handful of people said "this is finished, in 5 years we will not write code by hand"
+		- at that point it was barely autocomplete
+		- most experienced developers laughed
+	- next layer lands → a few more come around → next layer → more
+	- threshold for "this is real" is different for every person
+	- hype machine just hits everyone's threshold at a different time
+	- author's current position
+		- not at AGI for general-purpose anything
+		- for software development specifically — "can a system take a goal and ship working code without me babysitting" — 1-2 model generations away from yes
+		- not a single dramatic event — one more small step
+		- self-improving loop that ships a working production service is next quarter or two
+	- concrete experience this week
+		- built a workflow that builds workflows — a meta-framework
+		- asked it to use itself to rebuild itself in a different framework
+		- then to use the rebuild to rebuild itself in a third framework
+		- overnight, no supervision, did the whole chain
+		- cost ~250 euros
+		- got: working implementation in 3 frameworks + wiki-style mental model explaining where central design decisions diverged
+		- by hand: ~3 days per framework + 2 days for the comparison = ~11 days
+		- author does not know any of those 3 frameworks well enough to have written the comparison
+		- output is not just cheaper — it is something the author could not have produced
+		- when the system can do work you could not produce → it is past you on that work
+		- not AGI in general — but on that specific task, crossed the line
+- what this means if you are a developer right now
+	- spend as much of your time as you can afford on learning this
+	- not on shipping the next feature with old tools faster
+	- on shipping the next feature using these tools at all, even when it takes twice as long the first time
+		- doubling is the cost of learning
+		- after 3-4 iterations same task gets faster than the old way + you have absorbed the pattern
+	- learning curve from a workshop participant
+		- first workflow: full day of babysitting to get end-to-end
+		- second on same harness: a few hours
+		- third: probably half an hour
+		- steep curve, slope in your favour, only way to climb is to climb
+	- the actual leverage is self-tooling that compounds
+		- not "ship the same feature faster"
+		- when you find yourself doing the same 10-step thing for the 3rd time → stop, write a quick skill / tool wrapper, move on
+		- skill may be ugly, 10 min of vibe-coded glue — saves time forever after
+		- over a month → compounds into a personal harness nobody else has
+		- "watch yourself for what you keep wasting time on, then carve 10 minutes to fix it" — that is the loop to run on yourself
+	- counter-argument from strong developers
+		- "I do not enjoy this. I want to write code, not babysit AI. The job I will have in a year is not one I want."
+		- real cost — two of the best developers the author knows are considering leaving the field
+		- honest answer: those who lean in can move from babysitting → loop engineering itself (building systems that obviate the babysitting)
+		- that work is more interesting than the work it replaces
+		- but transition is not free and loss is not nothing
+- closing — this generalises beyond developers
+	- everything on a computer that is mostly logical steps over information is exposed to the same pattern
+		- accounting
+		- parts of legal work
+		- parts of analyst work
+	- there will always be a lawyer talking to the judge
+		- may not always be a lawyer drafting the contract
+	- there will always be an accountant signing the books
+		- may not always be a junior building the spreadsheet
+	- social arrangements depending on those jobs — much bigger question
+	- not done with loop engineering
+		- papers heading further: evolutionary frameworks, genetic algorithms wrapped around agent populations, search over the harness itself
+		- self-improvement is what is deployed today
+		- next layer: agents that design other agents and pick the best under some fitness function
+		- layer after that — unknown
+	- rate of layers landing is faster than the author has seen anything land
+	- each multiplies previous ones rather than adding to them → curve is genuinely steep
+	- that is not hype — that is what shows up in the work this week

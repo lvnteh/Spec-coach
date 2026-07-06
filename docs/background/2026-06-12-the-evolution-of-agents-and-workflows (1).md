@@ -1,0 +1,288 @@
+- the toy problem
+	- three ops: `registerTemplate`, `compileTemplate`, `send`
+	- REST backend ships with workshop repo
+	- user types "Send a welcome message to Viktor Somodi" → notification appears
+	- task stays the same across exercises, only *how* the agent is built changes
+- seven dimensions to compare every agent design
+	- available tools: what can the agent do?
+	- available workflows: none / code / prompt / skill / structured spec?
+	- control: code or LLM picks the next step?
+	- speed: how many round-trips to a result?
+	- reliability: same thing twice in a row?
+	- context management: what stays, gets summarised, gets dropped?
+	- dynamic: can it handle a request you didn't plan for?
+- static workflow — where we used to live
+	- 3-4 years ago: no agents, no tools, just one HTTP call to the model
+	- you decomposed the task in code, used LLM only for narrow steps (e.g. free text → structured object)
+	- example flow for personalization
+		- ask LLM: is this on-topic? (true/false)
+		- ask LLM: extract message, recipient, placeholders
+		- code validates extraction
+		- code calls `registerTemplate` → `compileTemplate` → `send`
+		- maybe one more LLM call to format confirmation
+	- dimensions
+		- tools: just functions in your code, LLM never sees them
+		- workflow: code you wrote
+		- control: code
+		- speed: best possible — only the LLM calls you explicitly chose
+		- reliability: best possible — deterministic order
+		- context: yours to handle
+		- dynamic: bad — only the workflows you coded for
+	- patterns to soften rigidity: chain workflows, run in parallel, router LLM at front, factor out building blocks
+		- same patterns as event-driven architectures, ~8-10 of them
+		- still constrained to workflows you supported
+	- first workshop exercise was exactly this — `generateObject` extracts data, code chains the three calls
+	- still has the best price-latency profile, even today
+		- if you run hundreds of calls per minute, nothing beats it
+- ReAct — handing control to the LLM
+	- tool-calling arrived: model asks for a function, sees result, decides next step
+	- ReAct loop: Thought → Action → Observation, repeat until done
+	- tools still in your codebase
+		- wrap each backend function with description + input schema
+		- Zod in workshop, but framework converts to JSON Schema (the API standard)
+	- workflows move from code into the prompt
+	- code's job: bound the loop (e.g. "stop after 8 steps")
+	- dimensions
+		- tools: in code
+		- workflows: in prompt
+		- control: LLM
+		- speed: slowest of all — 4-6 round-trips replace one static call, each LLM call ~1s+
+		- reliability: worse — gets lost, picks wrong tool, exits loop early
+		- context: LLM's problem now
+		- dynamic: this is what you bought — handles unanticipated requests
+	- tool schema protip
+		- description on every field matters as much as the tool description
+		- be as restrictive as you can
+		- e.g. if a field must be 1-5, encode that — validator rejects bad calls
+- Plan → Execute, and todo list
+	- ReAct's main weakness: gets lost
+	- Plan → Execute
+		- LLM plans the full sequence up front
+		- then executes that plan
+		- skips the "what next" turn between every tool call → faster
+		- written plan to follow → slightly more reliable
+		- not enforced — model can still deviate, but usually stays on track
+		- a step back toward static predictability, but plan is generated on the fly
+	- todo lists as tools
+		- model maintains a todo list as a tool
+		- system prompt tells it to re-read the list before every step
+		- without this, a 50-message history would push the original plan out of context
+		- modern Claude Code system prompt does exactly this
+			- short instruction on using todos
+			- injected reminder before every tool call to check/update list
+		- still not full enforcement — model can forget to update or skip steps
+		- reliability has improved as todo usage entered training data
+	- both inherit ReAct's profile, trade speed for reliability
+	- fundamental property unchanged: LLM in charge, nothing forces it to stay on plan
+- MCP — making tools portable
+	- before MCP: tools lived in the agent's codebase
+		- copy-paste, npm packages, re-implement in two languages
+		- LangChain offered some reusable tools but it was painful
+	- MCP = standard wire format for exposing tools to LLMs over a network
+	- server publishes tools, resources, prompts (over stdio or Streamable HTTP)
+	- client (the agent) discovers and calls them at runtime
+	- whoever owns the tool ≠ who runs the agent
+		- swap backends, share across teams, run tools in another process/language/machine
+	- agent loop unchanged — still ReAct under the hood, only the wiring is new
+	- an MCP server is NOT complex infrastructure — it's a thin layer in front of an existing backend
+	- workshop example: FastMCP ingests OpenAPI spec, exposes one tool per operation, schemas/descriptions from the spec
+		- zero codegen, ~5 lines of Python
+			- ```python
+				from fastmcp import FastMCP
+				import httpx, yaml
+				from pathlib import Path
+				
+				spec = yaml.safe_load(Path("specs/rest/openapi.yaml").read_text())
+				client = httpx.AsyncClient(base_url="http://localhost:3010")
+				mcp = FastMCP.from_openapi(openapi_spec=spec, client=client, name="backend")
+				mcp.run(transport="http", host="127.0.0.1", port=3020)
+				```
+	- test the server with MCP Inspector before any agent — list tools, see operations
+	- at SAP same pattern at larger scale: MCP gateway in front of existing backends, hand it an OpenAPI spec
+	- mental model: "thin layer in front of the backend", not "rewrite the backend"
+	- agent-side swap is small
+		- `createMCPClient`, `client.tools()` returns AI-SDK-shaped tools
+		- pass to `generateText({ tools })`
+		- no Zod, no `tool({...})` wrapper, no schemas in your code — server owns them
+		- always close the client in a `finally` block
+	- production rule at SAP: HTTP calls happen only through MCP
+	- real cost: tool results land in agent context
+		- e.g. 1 MB of HTML in context can derail half the runs
+		- pushes you toward skills (see next)
+- Skills — workflows packaged with their tools
+	- MCP solved tool reuse, but two new problems appeared
+	- problem 1: context bloat
+		- 200 tools is realistic (Slack + Jira + Confluence + your own MCPs)
+		- full JSON Schema of every tool sits in context for the whole session
+		- lots of tokens before you've said anything
+	- problem 2: tool-selection scaling
+		- 200 functions, model has to pick the right one
+		- like asking a human to pick from 200 programming languages they know
+	- skill = markdown file `SKILL.md` in a directory
+		- directory holds resources too: spec files, examples, scripts
+	- system prompt gets a *catalogue* — 1-2 lines per skill (what + when)
+	- only when model uses the skill does it read the full `SKILL.md` + dir contents
+		- catalogue paid for upfront, full body loaded dynamically
+	- skill packages tools AND workflows
+		- MCP said how to expose tools, nothing about composing them
+		- skill body can say "for campaign creation, call these 5 ops in this order, here's the data flow"
+		- you can write skills about other people's tools — don't have to own them
+	- dimensions shift
+		- tools: code + skill
+		- workflows: prompt + skill
+		- control/context/dynamic: similar to other LLM-driven approaches
+		- reliability: depends on the skill
+	- agent needs tools to act on skill instructions
+		- read spec files, make HTTP calls if skill says to curl
+		- Claude Code has bash for free
+		- custom agents need explicit tools
+		- workshop simplest version: give it bash (handles file reads + HTTP)
+		- production: scoped tools instead (read-only file tool restricted to skill dir, single HTTP tool, etc.)
+	- sharp reason to prefer skill-driven over MCP-direct
+		- skills let the agent *chain* operations in one bash command, never bringing intermediate results into context
+		- e.g. templated notification with HTML body
+			- MCP: HTML blob lands in context as tool result
+			- skill + bash: pipe curl through `jq` to extract just the name, or save HTML to disk and read only one line
+		- Claude Code is especially strong at this (HTTP + jq + file ops in one-liners)
+		- MCP spec has proposals for similar but not there yet
+	- trap when asking model to write a skill
+		- it tends to write 200-300 lines duplicating the OpenAPI spec
+		- exactly what you don't want
+		- whole point of `openapi.yaml` next to `SKILL.md` is the spec is single source of truth
+		- correct instruction: "read `openapi.yaml` for endpoints/schemas, `arazzo.yaml` for the register → compile → send sequence, calls via curl to localhost:3010"
+		- duplication is worse than useless — drift causes contradictions that confuse the model
+		- saw concretely: MCP server had structured descriptions, skill duplicated all of them verbatim, no benefit + inconsistency risk
+- Dynamic workflows — where things are going
+	- everything until now: LLM in a loop, deciding at every step
+	- reliability problems are all downstream of that
+		- plan helps, todo list helps — they're patches
+	- new pattern: agent decides up front on a workflow (code or structured spec)
+		- workflow then executed by something deterministic
+		- LLM not in inner loop anymore
+		- back to LLM as planner, execution handed to code
+		- reliability back — workflow runs the same way every time
+	- showing up across the industry
+		- Meta paper: agent writes Python code that drives the rest
+		- Anthropic experimental Claude Code feature: templating language with JS-style annotations, not raw code
+		- both: combine agent-generated plan with code-execution reliability
+	- dimensions
+		- tools: MCP / skills / typed tools — agent picks at workflow-generation time
+		- workflows: prompt + skill, written as structured spec the engine enforces
+		- control: code (workflow is just executed)
+		- speed: fast — overhead in planning, none during execution
+		- reliability: best — same as static workflow once generated
+		- context: code's job again, can fork sub-agents and route context
+		- dynamic: more — workflows generated on demand, not limited to hand-written ones
+	- author's own framework: workflows in YAML
+		- steps, control flow, parallelism, sub-workflows
+		- building blocks: fan-out-then-merge, tournament ("run N variants, pick best with a judge"), human-in-the-loop pauses
+		- workers in pre-built Docker images pick up tasks
+		- workflow is *durable* — crash a step, resume from there (like a message queue)
+		- vs Claude Code on laptop: close the lid, work is gone
+		- worker pool on a 48-core server, scale up/down, no local tie
+	- examples
+		- deep research workflow
+			- expensive: many search queries, fetches, adversarial verifications, critics, synthesis
+			- tree shape: top level fans out into queries, each query is a sub-workflow that fetches + reads
+			- results merged + critiqued at the top
+			- sub-workflows are first-class, children run in parallel on separate workers
+		- daily tracing report
+			- scheduled workflow pulls previous day's trace data into a file
+			- hands file to an agent (agent never uses search API directly — can't mess that up)
+			- agent produces structured JSON report
+			- code turns JSON into HTML
+			- point: mix AI and ordinary code, don't burn tokens on deterministic parts
+		- 55-file migration
+			- Python step found the files
+			- 55 parallel agent runs (5 at a time, bounded by worker pool), one per file
+			- each transformation followed by a guard step: static shell check + tiny haiku-model agent verifying no unrelated edits
+			- ran ~3.5 hours overnight, correct result
+			- trust came from reviewing *the workflow*, not each output — workflow guarantees identical processing
+	- first workflow is painful
+		- workshop participant: every node had something wrong on first run (output shape, permissions, file visibility across steps)
+		- full day debugging node-by-node
+		- after first end-to-end success: pattern is reproducible
+		- workflows can be packaged as a skill once working — next workflow inherits the lessons
+	- two practical observations
+		- front-load thinking, back-load watching
+			- like heavy planning in the editor team: break task down, get architecture right, agree on division of work, trust the team
+			- old team = humans, new team = agents, same shape
+			- agent never gets tired, never context-switches out, runs through the night
+			- if plan is right, you wake up to it done; if failed, human-in-the-loop step pings you
+		- you still need a babysitter
+			- small agent polls the workflow every minute or so
+			- checks logs, looks for errored steps
+			- decides retry vs plan-update
+			- most of the time just confirms things are fine
+			- when something breaks: retries from failed step (durable workflow), escalates only on structural failure
+	- meta-shift: you're not building the feature, you're building the thing that builds the feature
+		- one level up, psychologically different
+		- hands-on coders find the transition uncomfortable
+		- some respected technical people considering stepping away because "this isn't programming anymore"
+		- workshop debate: how much do you have to understand to operate this way?
+		- answer: the bar isn't lower, it's the same
+		- everything you write for the agent must be something another human could pick up and execute
+		- if a human couldn't follow your instructions, neither can the agent
+		- shortcut of writing sloppy instructions and letting the agent figure it out doesn't hold up — unstated assumptions break it
+- A2A — making the agent reachable
+	- CLI is fine for hacking, doesn't compose
+		- other agents/apps/teams shouldn't have to `npx` your script
+	- Google-led Agent-to-Agent (A2A) protocol is emerging standard
+	- same shape as MCP for tools, but for whole agents
+	- each agent publishes JSON at `/.well-known/agent-card.json`
+		- name, protocol version, URL, transport
+		- declared skills, capabilities (streaming, push, auth)
+		- default input/output modes
+	- clients fetch card once, learn what + how, then send messages
+	- mandatory shape at Emarsys + SAP for serving agents
+	- engagement agents stack: A2A outside, MCP inside
+		- A2A backend exposes agent
+		- executor calls into agent code
+		- agent code uses MCP to talk to operational backends
+		- MCP servers wrap REST backends
+		- three layers + REST below, each layer thin, each wraps below in a different protocol vocabulary
+		- layers don't add logic, they add reach
+	- workshop A2A server in two files
+		- one mostly boilerplate: agent card, JSON-RPC handler, mount endpoints
+		- other is the executor — the actual agent work
+	- non-obvious trap: executor must publish a `Task` event first
+		- `kind: "task"`, `state: "submitted"`
+		- before any status updates
+		- skip it → result manager has nothing to attach status to
+		- framework returns "Agent execution finished without a result" with no clue why
+		- correct order: task event → `working` status → run agent → `completed` (or `failed`) with final message
+	- A2A Inspector — official web UI
+		- fetches agent card, validates against spec, opens chat, shows raw JSON-RPC frames
+		- no pre-built Docker image, build locally
+			- ```bash
+				docker build -t a2a-inspector https://github.com/a2aproject/a2a-inspector.git
+				docker run -d -p 8088:8080 a2a-inspector
+				```
+		- runs in Docker: `localhost` resolves to container's localhost
+		- must use `host.docker.internal` to reach your local A2A server
+		- UI is terrible, but protocol checks are useful, and it works
+- what this means for what we're building
+	- every step kept the backend unchanged — only the *wrapping* changed
+		- code → ReAct → MCP → skill → A2A wrapping
+	- layers are thin and largely convertible
+	- don't fall in love with any layer
+		- understand the problem each solves: tool reuse, workflow reliability, context bloat, agent discoverability
+		- next month a new framework will solve the same problems with different names
+		- step far enough back, you can re-map any new thing onto the same picture
+	- concrete shape for engagement agents
+		- A2A on the outside
+		- MCP-only for any HTTP
+		- skills as primary way to package workflows
+		- deployed as Docker images, likely in SAP infrastructure (not Emarsys)
+		- "you only need to write a skill" sounds great until you remember operating a service you didn't write on infrastructure you don't own is its own learning curve
+	- dynamic-workflow direction not in production stack yet, give it ~6 months
+		- skills lagged public release by 3-6 months before reaching internal env
+		- dynamic workflows follow the same curve
+		- missing piece for tasks past what a single in-loop agent can handle
+		- multi-day tasks plausible now — plan as structured workflow, durable executor runs it
+		- this week's experiments: multi-hour / multi-shift runs completing because structure holds even when individual steps wobble
+	- start playing with this now even if not production this quarter
+		- first workflow is brutal (lost-a-day-debugging is the norm)
+		- second is much easier
+		- after a handful + packaging lessons into a skill, you're operating one level above the work
+		- productivity multiplier is large enough that going back is hard

@@ -1,0 +1,314 @@
+- why agents need their own knowledge access
+	- in a software company knowledge is everywhere: Jira, Confluence, Slack, email, code, people's heads
+		- humans were the connective tissue — you knew which page, which thread, who to ping
+		- no central place to type a question and get a cross-surface answer
+	- agents can't read your Jira or your Slack — without context they hallucinate
+		- public model has none of our internal repos, decisions, or domain specifics
+		- e.g. invents plausible-sounding answer about how the editor works
+	- why not just train the model on our knowledge?
+		- fine-tuning costs millions per run
+		- our knowledge changes hourly, not weekly — training can't keep up
+		- still useful for slow-moving company concepts, not for live docs
+	- happy side-effect: LLMs are good at the painful parts of docs
+		- summarizing, structuring, connecting, keeping things consistent
+		- solve retrieval → LLM can also help maintain the knowledge
+	- four approaches, roughly in order of evolution — combine them for the win
+- Embedding + RAG
+	- oldest of the four — pre-dates current LLM renaissance
+	- concept: text → vector capturing meaning in many dimensions
+		- each dimension loosely captures a concept (animal-ness, has-wheels-ness, royalty, gender, …)
+		- we don't know what each dimension means — the model learns them
+		- similar numbers across dimensions = similar meaning
+		- classic example: `king − man + woman ≈ queen` — geometry actually holds
+		- distance = cosine similarity, threshold tuned per use case
+	- whole-document embedding is useless
+		- e.g. embed the Bible, search "father" → everything matches
+		- must chunk documents
+		- chunking is hard: character boundaries split paragraphs, paragraph boundaries get unwieldy
+		- usually want overlap between chunks so context isn't lost at the seam
+		- choice at query time: hand agent just the chunk, chunk + neighbours, or whole doc
+	- the pipeline used to be miserable to build
+		- document conversion, chunking strategies, embedding model choice, vector DB
+		- hosted services now do the whole thing
+		- Google File Search: drop in PDFs, get chat + search API back — but can't use at the company for compliance
+	- [`qmd`](https://github.com/tobi/qmd) — local plug-and-play RAG
+		- runs everything locally: embedding model, reranker, query rewriting
+		- index stored in SQLite
+		- ~900 token chunks with 15% overlap
+		- does query expansion (synonyms, related terms) and reranking
+		- BM25 keyword search as fallback
+		- exposes itself as MCP server
+		- first query slow (downloads gigabytes of models), then fast
+		- install flow: one-liner npm install, `qmd collection add`, `qmd embed`, `qmd query`
+	- embedding alone isn't that good
+		- semantic search ~50–60% on a 5-point feel scale
+		- keyword search not dramatically better
+		- trick: run both in parallel, merge + rerank → hybrid genuinely outperforms either
+		- this is what qmd does internally
+	- the 2.0 picture
+		- query decomposition: split complex question into sub-queries
+			- e.g. "what should I do next week" → "what is next week" + "what should I do" + variants
+		- query expansion: synonyms, alternative phrasings
+		- pull wider candidate set (50–100), reranker re-scores for precision before agent sees it
+		- all small fast local models
+	- ceiling: works up to ~100K documents
+		- past that, everything matches everything
+		- most internal use cases are nowhere near
+	- vector DBs are a whole business
+		- Pinecone raised a lot of capital
+		- pgvector for our scale, Redis early, SQLite fine for personal
+	- caveats from the room
+		- result still goes up to cloud LLM for generation — data leaves your machine there
+			- fix: use local model for generation too, trade quality for privacy
+		- Hungarian queries against English corpus: should work in theory
+			- embedding maps concepts, not words
+			- works less well as languages get conceptually further apart
+			- English embeddings noticeably the best quality
+- Agentic Search
+	- inverts the question: no pre-processing
+		- give the agent tools (file listing, grep, file reading) and let it figure out what to look at
+		- iterate until it has enough context
+	- this is what Claude already does on a codebase — no embedding, no chunking, no vector DB
+	- high-end shape: a "knowledge layer" sitting in front of raw tools
+		- has its own LLM inside deciding how to use tools
+		- user-facing agent calls knowledge layer as one tool
+		- emerging standards for building these efficiently
+		- turtles all the way down
+	- trade-offs vs RAG
+		- more flexible — anything you can give a tool for becomes searchable
+		- scales without bound — agent decides how deep
+		- simple to set up — plug in tools, not build a pipeline
+		- slow: RAG returns in milliseconds, agentic search in seconds
+		- hard questions: minutes or hours — strength too, given enough time finds what RAG misses
+	- mature view: not competitors, but layers
+		- RAG becomes one of the agent's tools
+		- agent tries RAG first, falls back to grep if results look incomplete
+- Karpathy Wiki
+	- newer (~6 months old) — Karpathy popularised it, not first to attempt
+	- idea: pre-process sources into a wiki
+		- not vectors (RAG), not crawled at query time (agentic search)
+		- collection of interlinked pages, one topic per page, explicit cross-links
+		- like Wikipedia but for your own knowledge
+		- index page lists everything with one-line summaries — agent's map
+	- query time: agent traverses like a human
+		- hits index, picks a page, reads it, follows links
+		- pre-built structure = faster path than blind grep
+		- wiki is plain markdown — you can read it
+	- key differentiator: human-readable
+		- RAG vectors opaque, agent grep trails un-auditable
+		- wiki is yours — sit down, browse, fix, watch the agent's understanding evolve
+		- valuable now while transferring tacit knowledge into machine-readable form
+		- maybe not needed in 10 years when the agent is better than us
+	- four operations
+		- ingest: read source, decide which pages to update/create, link them
+		- query: navigate using index + links
+		- lint: audit health — broken links, orphans, contradictions
+			- agent sometimes forgets to clean up while editing
+		- update: propagate a conceptual change across pages
+	- on-disk structure
+		- `SCHEMA.md` — root conventions
+		- `raw/` — immutable source documents
+		- `wiki/`:
+			- `index.md`
+			- `log.md` — append-only operation log
+			- `overview.md` — evolving synthesis
+			- `pages/` — flat, one slug-named markdown per page
+		- flatness matters — hierarchical variant exists, but the skill assumes flat
+	- skill used: [`wiki-skills`](https://github.com/kfchou/wiki-skills)
+		- fork of Karpathy's [original gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)
+		- `wiki:init` interrogates you, lays out schema
+		- ingest/query/lint/update skills for the four operations
+	- trade-offs
+		- speed: medium — sometimes slower than RAG, sometimes faster than pure agentic search
+		- performance: very good on designed questions
+		- complexity: low — concept simple, storage plain markdown
+		- real costs: scalability and manual work
+	- scalability ceiling: hundreds of pages
+		- past that, agent struggles to keep structure coherent
+		- can extend by combining with RAG → wiki = human layer, qmd = fast retrieval
+		- pushes ceiling to thousands, brings RAG complexity back
+	- manual work is the price of human-readability
+		- review every ingest
+		- wiki = single source of truth — bad page poisons everything downstream
+		- considering rule: 3 peer reviews before merging wiki changes (heavily-protected branch)
+	- raw sources are always behind it
+		- `raw/` keeps immutable originals
+		- can rebuild from raw if wiki drifts
+		- every page tracks its source — traceable back
+		- changelog records what changed and why
+	- participant observation: building wiki from a codebase is incomplete
+		- pulled in editor repos, asked agent to wiki the template push/pull/update flows
+		- push found cleanly, update missed entirely — only noticed because he knew it existed
+		- direct ask for "pull" surfaced it, but silent absence otherwise
+		- limit of code-as-documentation: code expresses what it does, not everything important is explicit
+		- fix: feed in help portal, architecture docs, decision records alongside code
+	- wiki agent doesn't maintain index perfectly
+		- links break, references go stale
+		- lint matters, can't trust without human attention
+	- the multi-wiki question
+		- editor wiki + personalisation wiki + segmentation wiki overlap
+		- option 1: let agent pick which wiki to enter
+			- problem: strength comes from cross-links — if editor doesn't link to personalisation, the answer is never reached
+			- cross-links between wikis needed, hard structural problem
+		- option 2: domain-specialist agent per wiki + orchestrator
+			- adds layers, every layer is a quality drop point
+		- try several variants in coming cycles
+	- not everything belongs in a wiki
+		- architecture: diagram > prose, agent can read diagrams
+		- behavioural specs: Gherkin files in a repo, human-readable, agent can grep
+		- wiki for concepts + high-level structure, other specs alongside
+		- query becomes hybrid: wiki for concepts, Gherkin for behaviour
+	- hands-on: deep-research outputs about diets + Hungarian agriculture
+		- `wiki:init` → ingest research docs → ingest recipes → update with a conceptual change
+		- people noticed: when asked to ingest a folder, Claude sometimes bypassed the skill and parsed manually
+		- skill expects `wiki:ingest` per document
+		- start session with explicit `/wiki:ingest …` to ensure skill use
+		- can ask agent in-session whether it used the skill — won't lie
+- Knowledge Engine
+	- newest, most speculative — tooling barely exists outside one or two vendor products
+	- core idea: parse raw inputs into use-case-specific structured stores + use-case-specific query interface on top
+		- RAG vectorises everything uniformly
+		- agentic search searches everything raw
+		- knowledge engine extracts what each use case needs, in the shape that use case needs
+	- recipe example
+		- folder of recipes in mixed formats (prose, markdown tables, scraped HTML)
+		- use cases: "cook in under 20 min?", "keto-friendly?", "uses ingredients I have?"
+		- write a parser per use case → typed store (calories, prep time, ingredients, tags)
+		- queries hit structured store, return in ms with right structure
+	- two parts per use case
+		- parser: extracts structured data — smartness lives here
+		- query interface: runs against parser output
+	- vendor trend: agents build parsers and queries for you
+		- give it eval pairs (Q + expected A) and a library of skills
+		- agent iterates: generate parser + query, run evals, adjust
+		- eventually passes — working use case you didn't design
+	- parser classification logic can itself be a small trained model
+		- agent decides: deterministic parse, LLM call, or train a small classifier
+		- black-box "I give examples, you give fast structured query interface"
+	- Pinecone pushing this direction
+		- custom query language on top of their DB
+		- agent emits JSON-shaped DSL instead of SQL
+		- premise: hard enough that you'd rather pay than build
+	- DIY with off-the-shelf parts works
+		- author's version: SQLite, meeting transcripts
+		- extract action items, summaries, decisions, attendees → JSON conforming to schema → SQLite → regular SQL
+		- "what are my action items?", "when did we last discuss X?" return instantly
+		- schema is the contract — parser knows what to fill, queries know what to ask
+	- trade-offs
+		- speed: excellent — SQL on indexed structured data
+		- complexity: high — every use case has its own parser, schema, queries
+		- performance: excellent inside the use cases, unhelpful outside
+		- scalability: good, far better than wiki, thousands or tens of thousands of rows fine
+		- manual work: low after initial setup
+		- human-readable: "possible" — JSON / SQL inspectable, not as scannable as wiki
+			- can build notebook-style summary on top if needed
+	- architectural pendulum
+		- RAG = uniform embedding, wiki = uniform markdown
+		- knowledge engine deliberately doesn't unify — storage shape matches use case
+		- swing back from universal toward specific
+		- next wave likely swings back to standardised
+	- participant concern: lose cross-team property
+		- editor team's store doesn't know personalisation, and vice versa
+		- wiki at least has cross-linkable pages
+		- honest answer: not solved
+		- likely outcome: company-level shared knowledge + team/personal stores
+			- where the boundary lives is a hard problem this cycle
+		- what goes where:
+			- architecture → diagrams + OpenAPI specs
+			- behavioural specs → Gherkin
+			- recipe-like → structured stores
+			- wiki → conceptual glue
+	- hands-on: build-your-own knowledge engine on recipe corpus
+		- no skill ready to drop in — tech doesn't exist off-the-shelf
+		- each person designed from scratch
+		- solution 1: agent extracts each recipe to JSON conforming to a schema → DuckDB → MCP server with `query_recipes` tool
+			- query shapes hard-coded (specific fields, tag matching)
+			- to make it a true knowledge engine: expose DuckDB schema to agent, let it write SQL
+		- solution 2: Claude wrote extraction Python, Council skill for sanity check
+			- Council insisted simplest workable approach (one parser, one JSON, one query path) — participant accepted
+			- schemas produced were good: rich field descriptions, validation rules, enums
+			- descriptions matter — they're what the agent reads when mapping fields to queries
+			- schema with one-line descriptions per field noticeably outperforms bare schema
+		- solution 3: regex-based extraction, agent iterating
+			- worked but script ballooned past 800 lines with special cases per format
+			- parser-quality trade-off: fixed format = deterministic cheap, variable inputs = LLM-extraction-with-schema OR ever-growing heuristic pile
+			- LLM extraction more expensive per doc, scales to new formats without code changes
+	- one more observation: rich-description JSON schema >> letting agent figure out structure
+		- schema is the target
+		- validate output, rerun on failure — catches most edge cases automatically
+		- without descriptions: improvised field names, inconsistent data
+	- the thing people skip and notice later: use-case definition
+		- whole premise is that schema + query shapes are derived from use cases
+		- people built generic schemas first, then discovered which queries they wanted — wrong order
+		- vendor versions lean on input/output examples → agent infers schema and queries
+		- build the eval pairs first, let the agent figure out the structure
+- comparing the four
+	- summary table:
+		- RAG: fast, high complexity, good performance, not human-readable, low flexibility, scales 100K+ docs, small manual work
+		- Agentic Search: slow, medium complexity, best performance, not human-readable, high flexibility, ~infinite scale, small manual work
+		- Karpathy Wiki: medium speed, low complexity, great performance, human-readable, medium flexibility, scales to hundreds, high manual work
+		- Knowledge Engine: fast, medium complexity, best performance, possibly human-readable, medium flexibility, scales to thousands, small manual work
+	- sweet spots
+		- RAG: many docs, fast retrieval needed
+		- agentic search: max flexibility, can spend wall-clock
+		- wiki: humans need to read/audit, small–medium scale
+		- knowledge engine: clear repeatable use cases, fast structured answers
+	- point isn't to pick one — layer them
+		- wiki: conceptual model
+		- knowledge engine: structured answers in specific domains
+		- RAG: fast keyword/semantic over the long tail
+		- agent on top decides which layer to consult
+	- awkward middle of evolution
+		- wiki tooling exists and works
+		- knowledge engine tooling barely exists outside vendors
+		- RAG tooling finally good
+		- agentic search built into every agent framework
+- a tangent that may matter more than the rest
+	- mid-discussion question: why try so hard to extract structure from meeting transcripts?
+		- transcript is low-quality source — long ramble we parse, dedupe, clean
+		- what if the meeting's deliverable was a structured document in the first place?
+	- straw-man: kill the meeting, replace with a document
+		- everyone writes their point in the right field
+		- the doc is the structured input the agent needs
+		- human review built in → no slop in the knowledge base
+	- objection: meetings aren't just data collection, they're discussion
+		- back-and-forth can reach a third idea neither would write
+		- can't replace that with a form
+	- but: most meetings aren't discussions
+		- status updates, decision reviews, async-able coordination
+		- standup → Confluence page, three lines each, read everyone else's
+		- decision review → doc with context/options/criteria/votes — review on the doc, not in a meeting where two people argue and others half-listen
+		- townhall → email
+	- Google Wave came up
+		- right tech, wrong moment
+		- Wave-shaped tool now: structured doc, multiple contributors, LLM keeps synthesis up to date, threads aggregate around claims, final state consumable by humans and agents
+		- looks like exactly where this knowledge-base evolution converges
+	- Council pattern is relevant
+		- meetings: serial, loudest voices dominate
+		- round-based structured doc: everyone fills in position first, then sees others
+		- surfaces quiet voices, reduces groupthink
+		- exactly the Council mechanic applied to people
+	- not naive about adoption
+		- async docs harder than meetings — meeting is itself a forcing function
+		- people don't want to read, they want to be present
+		- participant: doc alone doesn't ensure people read it, meeting is an expensive enforcement mechanism
+		- hybrid suggestion: keep the meeting slot, but fill in / comment on the doc together
+			- forcing function of meeting + structured output of doc
+	- for onboarding-style context
+		- NotebookLM-style podcast generated from the doc
+		- conversational flow some people learn from, no actual conversation needed
+		- conceded by the discussion-isn't-just-data participant
+	- clearest win: decision documents
+		- already written before contentious meetings
+		- currently: speed up meeting, shared context arrival
+		- next step: run the decision asynchronously on the doc
+			- round 1: read, clarifying questions, doc improved
+			- round 2: vote + write reasoning
+			- round 3 if needed: discussion in comments
+			- meeting at end only if still disagreement
+		- whole workflow compresses dramatically
+	- whether or not we build a product: experiment with workflow internally
+		- pattern fits the knowledge-base evolution
+		- structured human input → knowledge engine → maintains wiki → agents query across all of it
+		- meetings we don't need were never the point — the structured artifacts they produced were
+	- probably explored in the next workshop, starting with most obviously meeting-shaped ones
