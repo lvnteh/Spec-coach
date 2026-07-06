@@ -240,9 +240,9 @@ h1 { font-size: 16px; color: #f1f5f9; margin-bottom: 4px; }
 .m-pip.done { background: #38bdf8; }
 .m-pip.future { background: #1e293b; }
 .m-label { font-size: 11px; color: #475569; margin-left: 6px; }
-.dashboard { display: flex; gap: 0; border: 1px solid #1e293b; border-radius: 10px; overflow: hidden; }
-.spec-panel { flex: 1; padding: 20px; border-right: 1px solid #1e293b; }
-.guard-panel { width: 176px; padding: 20px; flex-shrink: 0; }
+.dashboard { display: flex; gap: 0; border: 1px solid #1e293b; border-radius: 10px; }
+.spec-panel { flex: 1; padding: 20px; border-right: 1px solid #1e293b; border-radius: 10px 0 0 10px; overflow: visible; }
+.guard-panel { width: 176px; padding: 20px; flex-shrink: 0; border-radius: 0 10px 10px 0; }
 .panel-title { font-size: 10px; letter-spacing: 1px; color: #64748b; text-transform: uppercase; margin-bottom: 14px; }
 .node { position: relative; display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; margin-bottom: 6px; cursor: default; border: 1px solid transparent; }
 .node:hover .tooltip { display: block; }
@@ -316,14 +316,14 @@ h1 { font-size: 16px; color: #f1f5f9; margin-bottom: 4px; }
       </div>
     </div>
     <span class="arrow">↓ consumed by</span>
-    <div class="node gen">
+    <div class="node impl">
       <span class="node-icon">🛣️</span>
       <span class="node-name">src/routes.ts</span>
-      <span class="owner-badge badge-gen">GEN</span>
+      <span class="owner-badge badge-impl">IMPL</span>
       <span class="new-badge">NEW</span>
       <div class="tooltip">
         <div class="tooltip-name">src/routes.ts</div>
-        <div class="tooltip-desc">Hono route definition generated from the spec. Wires GET /hello to the handler. Do not edit.</div>
+        <div class="tooltip-desc">Hono route wiring scaffolded by the agent from the spec. Connects your OpenAPI operation to the handler. Do not edit — but unlike src/generated/, it is not regenerated when you run npm run generate.</div>
         <div class="tooltip-connects">From: <span>generated/</span> · Calls: <span>handlers.ts</span></div>
       </div>
     </div>
@@ -364,7 +364,7 @@ h1 { font-size: 16px; color: #f1f5f9; margin-bottom: 4px; }
     </div>
   </div>
 </div>
-<p class="hint">Hover any node to see what it does and how it connects. Open architecture.html again after each milestone to see the diagram grow.</p>
+<p class="hint">Hover any node to see what it does and how it connects. After each milestone the agent rewrites this file — open it again to see what was added.</p>
 </body>
 </html>
 ```
